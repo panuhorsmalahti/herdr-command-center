@@ -567,6 +567,9 @@ function body(w, height) {
 }
 
 const HINT = "↑↓ move  ⏎ open  r refresh  q quit";
+// The screen row (1-based, as mouse reports count) of the first list line:
+// below the header and the blank line under it.
+const BODY_ROW = 3;
 
 function draw() {
   if (!process.stdout.isTTY) return;
@@ -575,7 +578,7 @@ function draw() {
   const w = Math.max(10, (process.stdout.columns || 80) - 1);
   const rows = Math.max(4, process.stdout.rows || 24);
   const height = rows - 3;
-  const lines = [header(w), "", ...body(w, height)];
+  const lines = [header(w), "", ...body(w, height)]; // the list starts on BODY_ROW
   while (lines.length < rows - 1) lines.push("");
   lines.length = rows - 1;
   lines.push(` ${dim(fit(ui.flash || HINT, w - 1))}`);
@@ -594,8 +597,9 @@ function openSelected() {
   });
 }
 
-// Escape sequences for the keys we handle. Anything else starting with ESC is
-// skipped whole, and a lone ESC is the Escape key.
+// Escape sequences for the keys we handle. A mouse report becomes an object;
+// anything else starting with ESC is skipped whole, and a lone ESC is the
+// Escape key.
 const SEQUENCES = [
   ["\x1b[A", "up"],
   ["\x1bOA", "up"],
@@ -620,8 +624,16 @@ function* keys(data) {
       i += hit[0].length;
       continue;
     }
+    // SGR mouse report: ESC [ < button ; column ; row, then M (press) or m
+    // (release).
+    const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(data.slice(i));
+    if (mouse) {
+      yield { button: Number(mouse[1]), row: Number(mouse[3]), press: mouse[4] === "M" };
+      i += mouse[0].length;
+      continue;
+    }
     if (data[i] === "\x1b") {
-      const unknown = /^\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)/.exec(data.slice(i));
+      const unknown = /^\x1b(?:\[[0-9;?<=>]*[ -/]*[@-~]|O.)/.exec(data.slice(i));
       yield unknown ? "" : "esc";
       i += unknown ? unknown[0].length : 1;
       continue;
@@ -631,7 +643,19 @@ function* keys(data) {
   }
 }
 
+// A left click on a PR selects it; the wheel moves the selection, since the
+// list scrolls to follow it. Clicks elsewhere, other buttons, releases and
+// drags do nothing.
+function onMouse({ button, row, press }) {
+  if (!press || button & 32) return; // 32: motion
+  if (button & 64) return select(ui.selected + ((button & 3) === 0 ? -1 : 1)); // 64: wheel
+  if ((button & 3) !== 0 || row < BODY_ROW) return; // 0: left button
+  const line = ui.lines[ui.scroll + row - BODY_ROW];
+  if (line?.kind === "pr") select(line.index);
+}
+
 function onKey(key, quit) {
+  if (typeof key === "object") return onMouse(key);
   const page = Math.max(1, (process.stdout.rows || 24) - 4);
   switch (key) {
     case "q":
@@ -670,7 +694,7 @@ function runPane() {
     done = true;
     const pane = closePane ? ownPaneId() : "";
     forgetPane();
-    stdout.write("\x1b[?25h\x1b[?1049l");
+    stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l");
     if (stdin.isTTY) stdin.setRawMode(false);
     // herdr keeps a pane whose command has exited, with a shell in it. Quitting
     // the list should take its pane away too. Not on a signal: that is herdr
@@ -681,8 +705,9 @@ function runPane() {
 
   rememberPane();
   // Alternate screen, cursor hidden: the shell's scrollback comes back intact
-  // when the pane quits.
-  stdout.write("\x1b[?1049h\x1b[?25l");
+  // when the pane quits. Mouse clicks and wheel reported in SGR form, which
+  // herdr passes on to a pane that asks for them.
+  stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h");
   stdin.setRawMode(true);
   stdin.setEncoding("utf8");
   stdin.on("data", (data) => {
