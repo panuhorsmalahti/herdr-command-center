@@ -86,7 +86,7 @@ column no PR uses is left out.
 | 💬 | review threads nobody has resolved |
 | 🟣 | merged (only with a `query` that includes merged PRs) |
 
-Draft PRs are dimmed. The column on the right is how long ago each PR was last
+Draft PRs are dimmed, or left out with `show_drafts = false`. The column on the right is how long ago each PR was last
 updated.
 
 PRs are grouped by repository. The repository with the most recently updated
@@ -105,6 +105,7 @@ cp examples/default-config.toml "$(herdr plugin config-dir phorsmalahti.command-
 | --- | --- | --- |
 | `query` | `"is:pr is:open author:@me archived:false"` | the GitHub search that picks the PRs |
 | `exclude_repos` | `[]` | repositories (`"owner/name"`) whose PRs are never listed |
+| `show_drafts` | `true` | list draft PRs (dimmed); `false` leaves them out |
 | `refresh_seconds` | `120` | how often the list refreshes by itself (at least 30) |
 | `follow` | `true` | move the pane to the tab you switch to; `false` leaves it put |
 

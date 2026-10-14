@@ -50,6 +50,8 @@ const DEFAULTS = {
   query: "is:pr is:open author:@me archived:false",
   // Repositories ("owner/name") whose PRs are never listed.
   exclude_repos: [],
+  // List draft PRs (dimmed). false leaves them out.
+  show_drafts: true,
   // How often the list refreshes by itself. `r` refreshes on demand.
   refresh_seconds: 120,
   // Move the pane along when you switch Space or tab, so it is always in
@@ -112,6 +114,7 @@ function loadConfig() {
   const cfg = { ...DEFAULTS, ...user };
   if (typeof cfg.query !== "string" || !cfg.query.trim()) cfg.query = DEFAULTS.query;
   if (!Array.isArray(cfg.exclude_repos)) cfg.exclude_repos = [];
+  cfg.show_drafts = cfg.show_drafts !== false;
   cfg.refresh_seconds = Math.max(30, Number(cfg.refresh_seconds) || DEFAULTS.refresh_seconds);
   cfg.follow = cfg.follow !== false;
   return cfg;
@@ -228,14 +231,15 @@ function ghError(r) {
 
 const REPO_NAME = /^[\w.-]+\/[\w.-]+$/;
 
-// The search actually sent. Excluded repos become `-repo:` qualifiers rather
-// than a filter on the results, so their PRs do not use up the 50 the search
-// returns; GitHub ignores a `-repo:` naming a repo that does not exist. An
-// entry that is not a plain owner/name is dropped, so it cannot rewrite the
-// rest of the query.
+// The search actually sent. Excluded repos and drafts become qualifiers
+// rather than a filter on the results, so their PRs do not use up the 50 the
+// search returns; GitHub ignores a `-repo:` naming a repo that does not exist.
+// An entry that is not a plain owner/name is dropped, so it cannot rewrite
+// the rest of the query.
 function searchQuery(cfg) {
   const parts = [cfg.query];
   for (const repo of cfg.exclude_repos) if (REPO_NAME.test(repo.trim())) parts.push(`-repo:${repo.trim()}`);
+  if (!cfg.show_drafts) parts.push("draft:false");
   if (!/\bsort:/.test(cfg.query)) parts.push("sort:updated-desc");
   return parts.join(" ");
 }

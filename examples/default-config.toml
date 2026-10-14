@@ -22,6 +22,9 @@ query = "is:pr is:open author:@me archived:false"
 #   ]
 exclude_repos = []
 
+# List draft PRs, dimmed. false leaves them out.
+show_drafts = true
+
 # How often the list refreshes by itself, in seconds (at least 30). Press `r`
 # in the pane to refresh on demand.
 refresh_seconds = 120
