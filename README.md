@@ -148,6 +148,10 @@ the pane.
   Both fire on a Space switch, so runs take turns through a lock file, and each
   one reads where you are when its turn comes. Moving the pane changes no
   focus, so it cannot trigger itself.
+- **Resizing.** herdr resizes a pane it moves or opens, but not the pane that
+  pane split, so the program there would keep drawing at its old width, over
+  the list, until you focused it. After each move or open the plugin nudges the
+  new split out and back, which makes herdr resize both sides.
 - **Demo mode.** With `COMMAND_CENTER_DEMO=1` the pane lists made-up PRs in
   made-up repositories, for screenshots that must not show your own:
 

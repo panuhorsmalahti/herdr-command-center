@@ -811,6 +811,16 @@ function rightEdgePane(paneId) {
   return panes.reduce((best, p) => (!best || right(p) > right(best) || (right(p) === right(best) && p.rect.y < best.rect.y) ? p : best), null);
 }
 
+// herdr resizes a pane it moves or opens, but not the pane that pane split:
+// until something else resizes that one, its program keeps drawing at its old
+// width, over and under the list, and wraps only once you focus it. Nudging
+// the split between them out and back makes herdr resize both, and leaves the
+// split where it was.
+function settle(paneId) {
+  herdr(["pane", "resize", "--pane", paneId, "--direction", "right", "--amount", "0.01"]);
+  herdr(["pane", "resize", "--pane", paneId, "--direction", "left", "--amount", "0.01"]);
+}
+
 function paneWidth(paneId) {
   const panes = herdrJson(["pane", "layout", "--pane", paneId])?.layout?.panes || [];
   return panes.find((p) => p.pane_id === paneId)?.rect.width || 0;
@@ -872,7 +882,9 @@ function followFocus() {
     const ratio = width && target.rect.width ? Math.max(0.25, Math.min(0.8, 1 - width / target.rect.width)) : DEFAULT_RATIO;
     const args = ["pane", "move", mine.pane_id, "--tab", focused.tab_id, "--target-pane", target.pane_id];
     args.push("--split", "right", "--ratio", ratio.toFixed(2), "--no-focus");
-    return herdr(args, ["ignore", "ignore", "inherit"]).status ?? 1;
+    const r = herdr(args, ["ignore", "ignore", "inherit"]);
+    if (r.status === 0) settle(target.pane_id);
+    return r.status ?? 1;
   });
 }
 
@@ -904,6 +916,7 @@ function openPane() {
     process.stderr.write(`command-center: cannot run ${HERDR}: ${r.error.message}\n`);
     return 1;
   }
+  if (r.status === 0 && target) settle(target);
   return r.status ?? 1;
 }
 
