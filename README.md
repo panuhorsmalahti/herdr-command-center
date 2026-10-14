@@ -5,24 +5,9 @@
 > [herdr-space-topic](https://github.com/panuhorsmalahti/herdr-space-topic)
 > marks a Space.
 
-```text
- Pull requests 12                                       updated 13:49
+![Command Center pane listing pull requests from four repositories, each marked with its checks, review state, conflicts and open threads](docs/screenshot.png?v=e3b3202)
 
- acme/api-server 6
-     ✅ 💬 #482  feat(auth): rotate session tokens when a role ch…   6m
-     ❌    #479  fix(billing): round invoice totals per line item   25m
-     🟡    #476  chore(deps): bump the Go toolchain to 1.25         52m
-  📝 ✅    #471  perf(search): cache query plans across requests     3h
-     🔀 💬 #463  refactor(storage): put the blob store behind an…    2d
-
- acme/web-app 3
-  📝 ✅ 💬 #1290 feat(dashboard): add a weekly usage chart          48m
-     ❌ 💬 #1284 fix(forms): keep focus on the first invalid field   5h
-
- ↑↓ move  ⏎ open  r refresh  q quit
-```
-
-<sub>Illustration with made-up repositories and PRs.</sub>
+<sub>Demo mode: the repositories and PRs are made up.</sub>
 
 herdr plugins cannot draw into herdr's own UI, but they can own a terminal
 pane, so this one draws its list there. It opens as a normal split pane that
