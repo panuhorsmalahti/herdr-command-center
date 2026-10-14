@@ -47,6 +47,7 @@ In the pane:
 | --- | --- |
 | `↑` `↓` / `k` `j` | move |
 | click a PR | select it |
+| double-click a PR | open it in your browser |
 | mouse wheel | move |
 | `PgUp` `PgDn`, `g` `G` | page, top, bottom |
 | `⏎` / `o` | open the PR in your browser (through `gh`, so `GH_BROWSER` applies) |

@@ -643,15 +643,26 @@ function* keys(data) {
   }
 }
 
-// A left click on a PR selects it; the wheel moves the selection, since the
-// list scrolls to follow it. Clicks elsewhere, other buttons, releases and
-// drags do nothing.
+// Mouse reports carry no click count, so a double-click is two presses on the
+// same PR this close together.
+const DOUBLE_CLICK_MS = 400;
+let lastClick = { index: -1, at: 0 };
+
+// A left click on a PR selects it, and a double-click opens it; the wheel
+// moves the selection, since the list scrolls to follow it. Clicks elsewhere,
+// other buttons, releases and drags do nothing.
 function onMouse({ button, row, press }) {
   if (!press || button & 32) return; // 32: motion
   if (button & 64) return select(ui.selected + ((button & 3) === 0 ? -1 : 1)); // 64: wheel
   if ((button & 3) !== 0 || row < BODY_ROW) return; // 0: left button
   const line = ui.lines[ui.scroll + row - BODY_ROW];
-  if (line?.kind === "pr") select(line.index);
+  if (line?.kind !== "pr") return;
+  select(line.index);
+  const now = Date.now();
+  const double = lastClick.index === line.index && now - lastClick.at < DOUBLE_CLICK_MS;
+  // A third click starts over rather than opening the PR a second time.
+  lastClick = double ? { index: -1, at: 0 } : { index: line.index, at: now };
+  if (double) openSelected();
 }
 
 function onKey(key, quit) {
