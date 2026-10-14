@@ -11,7 +11,8 @@
 
 herdr plugins cannot draw into herdr's own UI, but they can own a terminal
 pane, so this one draws its list there. It opens as a normal split pane that
-you can move, resize or zoom like any other.
+you can move, resize or zoom like any other, and it follows you from Space to
+Space.
 
 ## Install
 
@@ -28,7 +29,7 @@ Requires herdr >= 0.9.0, `node` >= 18 on your `PATH`, and the GitHub CLI,
 herdr plugin action invoke phorsmalahti.command-center.open
 ```
 
-The `open` action splits the focused pane and puts the list on the right. If
+The `open` action puts the list at the right edge of the tab you are in. If
 the pane is already open, it focuses that one rather than opening another. Bind
 it to a key in your herdr `config.toml`:
 
@@ -49,6 +50,16 @@ In the pane:
 | `⏎` / `o` | open the PR in your browser (through `gh`, so `GH_BROWSER` applies) |
 | `r` | refresh now |
 | `q` / `Esc` | close the pane |
+
+## It follows you
+
+A herdr pane belongs to one tab of one Space; herdr has no pane that shows in
+all of them. So when you switch Space or tab, the plugin moves the pane to the
+right edge of the tab you switched to, at the width it had. Resize it once and
+it keeps that width everywhere. The list keeps running through the move, so
+nothing reloads.
+
+Set `follow = false` to leave the pane where you opened it.
 
 ## The marks
 
@@ -86,6 +97,7 @@ cp examples/default-config.toml "$(herdr plugin config-dir phorsmalahti.command-
 | `query` | `"is:pr is:open author:@me archived:false"` | the GitHub search that picks the PRs |
 | `exclude_repos` | `[]` | repositories (`"owner/name"`) whose PRs are never listed |
 | `refresh_seconds` | `120` | how often the list refreshes by itself (at least 30) |
+| `follow` | `true` | move the pane to the tab you switch to; `false` leaves it put |
 
 `query` takes anything GitHub's search box does:
 
@@ -119,9 +131,14 @@ the pane.
   review threads are counted per PR.
 - **Offline or logged out**, the pane keeps the last list it had and shows the
   error in its header.
-- **Pane bookkeeping.** The pane records its id and process id in
-  `HERDR_PLUGIN_STATE_DIR`, so `open` can find it again. The record is removed
-  when the pane closes.
+- **Pane bookkeeping.** The pane records its terminal and process id in
+  `HERDR_PLUGIN_STATE_DIR`, so `open` and the focus hooks can find it again.
+  The terminal, because a pane gets a new id each time it moves to another tab
+  but keeps its terminal. The record is removed when the pane closes.
+- **Following** runs on herdr's `workspace.focused` and `tab.focused` events.
+  Both fire on a Space switch, so runs take turns through a lock file, and each
+  one reads where you are when its turn comes. Moving the pane changes no
+  focus, so it cannot trigger itself.
 - **Demo mode.** With `COMMAND_CENTER_DEMO=1` the pane lists made-up PRs in
   made-up repositories, for screenshots that must not show your own:
 

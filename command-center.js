@@ -10,6 +10,7 @@
 //
 //   node command-center.js           run the pane (what herdr launches)
 //   node command-center.js --open    open the pane, or focus it if it is open
+//   node command-center.js --follow  move the open pane to the tab you are in
 //   node command-center.js --once    print the list once and exit
 //
 // With COMMAND_CENTER_DEMO=1 it lists made-up PRs instead of yours, for
@@ -51,6 +52,9 @@ const DEFAULTS = {
   exclude_repos: [],
   // How often the list refreshes by itself. `r` refreshes on demand.
   refresh_seconds: 120,
+  // Move the pane along when you switch Space or tab, so it is always in
+  // view. false leaves it where it was opened.
+  follow: true,
 };
 
 // Drop a trailing `# comment`, but not a `#` inside a quoted value.
@@ -109,6 +113,7 @@ function loadConfig() {
   if (typeof cfg.query !== "string" || !cfg.query.trim()) cfg.query = DEFAULTS.query;
   if (!Array.isArray(cfg.exclude_repos)) cfg.exclude_repos = [];
   cfg.refresh_seconds = Math.max(30, Number(cfg.refresh_seconds) || DEFAULTS.refresh_seconds);
+  cfg.follow = cfg.follow !== false;
   return cfg;
 }
 
@@ -657,26 +662,6 @@ function onKey(key, quit) {
   }
 }
 
-// Where the open pane is, so `--open` can focus it instead of opening another.
-// The pid tells a live pane from one whose process was killed.
-// A demo pane is left out, so `--open` never focuses it instead of the real one.
-function rememberPane() {
-  if (!process.env.HERDR_PANE_ID || DEMO) return;
-  try {
-    writeFileSync(PANE_PATH, JSON.stringify({ pane: process.env.HERDR_PANE_ID, pid: process.pid }));
-  } catch {
-    // Without it `--open` just opens a second pane.
-  }
-}
-
-function forgetPane() {
-  try {
-    if (JSON.parse(readFileSync(PANE_PATH, "utf8")).pid === process.pid) rmSync(PANE_PATH);
-  } catch {
-    // Nothing remembered, or another pane's.
-  }
-}
-
 function runPane() {
   const { stdin, stdout } = process;
   let done = false;
@@ -708,31 +693,155 @@ function runPane() {
 }
 
 // ---------------------------------------------------------------------------
+// herdr
+// ---------------------------------------------------------------------------
+
+function herdr(args, stdio = ["ignore", "pipe", "ignore"]) {
+  return spawnSync(HERDR, args, { encoding: "utf8", stdio });
+}
+
+function herdrJson(args) {
+  const r = herdr(args);
+  if (r.status !== 0) return null;
+  try {
+    return JSON.parse(r.stdout).result;
+  } catch {
+    return null;
+  }
+}
+
+// Where the open pane is, so `--open` can focus it and `--follow` can move it.
+// By terminal, not pane id: a pane gets a new id every time it moves to
+// another tab, but keeps its terminal. The pid tells a live pane from one
+// whose process was killed. A demo pane is left out, so it is never the one
+// focused or moved.
+function rememberPane() {
+  if (!process.env.HERDR_PANE_ID || DEMO) return;
+  const terminal = herdrJson(["pane", "get", process.env.HERDR_PANE_ID])?.pane?.terminal_id;
+  if (!terminal) return;
+  try {
+    writeFileSync(PANE_PATH, JSON.stringify({ terminal, pid: process.pid }));
+  } catch {
+    // Without it `--open` just opens a second pane, and nothing follows you.
+  }
+}
+
+function forgetPane() {
+  try {
+    if (JSON.parse(readFileSync(PANE_PATH, "utf8")).pid === process.pid) rmSync(PANE_PATH);
+  } catch {
+    // Nothing remembered, or another pane's.
+  }
+}
+
+// The open Command Center pane (or null) and the pane you are focused on, in
+// one walk of the session: exactly one pane in it is focused.
+function livePanes() {
+  const panes = herdrJson(["pane", "list"])?.panes || [];
+  let mine = null;
+  try {
+    const { terminal, pid } = JSON.parse(readFileSync(PANE_PATH, "utf8"));
+    process.kill(pid, 0); // throws when that pane's process is gone
+    mine = panes.find((p) => p.terminal_id === terminal) || null;
+  } catch {
+    // No pane open.
+  }
+  return { mine, focused: panes.find((p) => p.focused) || null };
+}
+
+// The pane at the right edge of a tab (the top one, when several reach it):
+// the list goes there, so it reads as a column beside your work rather than
+// wedged between two panes of it.
+function rightEdgePane(paneId) {
+  const panes = herdrJson(["pane", "layout", "--pane", paneId])?.layout?.panes || [];
+  const right = (p) => p.rect.x + p.rect.width;
+  return panes.reduce((best, p) => (!best || right(p) > right(best) || (right(p) === right(best) && p.rect.y < best.rect.y) ? p : best), null);
+}
+
+function paneWidth(paneId) {
+  const panes = herdrJson(["pane", "layout", "--pane", paneId])?.layout?.panes || [];
+  return panes.find((p) => p.pane_id === paneId)?.rect.width || 0;
+}
+
+// ---------------------------------------------------------------------------
+// --follow: what the focus event hooks run
+//
+// A herdr pane lives in one tab of one Space; there is no pane that shows in
+// all of them. So the pane follows you instead: on every Space or tab switch
+// it moves to the right edge of the tab you switched to, at the width it had.
+// Its process keeps running through the move, list and all.
+// ---------------------------------------------------------------------------
+
+const LOCK_PATH = join(STATE_DIR, "command-center.lock");
+// The share of the target pane kept by your work when the list's own width is
+// unknown: the list gets the remaining 38%.
+const DEFAULT_RATIO = 0.62;
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Switching Space fires workspace.focused and tab.focused together, and two
+// moves at once would fight. Runs take turns, and each one reads where you
+// are when its turn comes, so the last leaves the pane where you ended up. A
+// lock left by a killed run is cleared by its pid.
+function withLock(fn) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      writeFileSync(LOCK_PATH, String(process.pid), { flag: "wx" });
+      break;
+    } catch {
+      try {
+        process.kill(Number(readFileSync(LOCK_PATH, "utf8")) || process.pid, 0);
+      } catch {
+        rmSync(LOCK_PATH, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) return 0;
+      sleep(50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(LOCK_PATH, { force: true });
+  }
+}
+
+function followFocus() {
+  if (!loadConfig().follow) return 0;
+  return withLock(() => {
+    const { mine, focused } = livePanes();
+    if (!mine || !focused || focused.tab_id === mine.tab_id) return 0;
+    const target = rightEdgePane(focused.pane_id) || { pane_id: focused.pane_id, rect: { width: 0 } };
+    const width = paneWidth(mine.pane_id);
+    const ratio = width && target.rect.width ? Math.max(0.25, Math.min(0.8, 1 - width / target.rect.width)) : DEFAULT_RATIO;
+    const args = ["pane", "move", mine.pane_id, "--tab", focused.tab_id, "--target-pane", target.pane_id];
+    args.push("--split", "right", "--ratio", ratio.toFixed(2), "--no-focus");
+    return herdr(args, ["ignore", "ignore", "inherit"]).status ?? 1;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // --open: what the `open` action runs
 // ---------------------------------------------------------------------------
 
-function herdr(args, stdio = "ignore") {
-  return spawnSync(HERDR, args, { stdio });
-}
-
 function openPane() {
-  try {
-    const { pane, pid } = JSON.parse(readFileSync(PANE_PATH, "utf8"));
-    process.kill(pid, 0); // throws when that pane's process is gone
-    if (herdr(["plugin", "pane", "focus", pane]).status === 0) return 0;
-  } catch {
-    // No pane open, or it went away: open a new one.
-  }
+  const { mine } = livePanes();
+  if (mine && herdr(["plugin", "pane", "focus", mine.pane_id]).status === 0) return 0;
   // A split opens beside an existing pane: the one the action ran from, or
-  // failing that the focused one. herdr refuses a split that also names a
-  // workspace, so the workspace is only for when there is no pane to split.
+  // failing that the focused one, or rather whichever pane of their tab is at
+  // its right edge. herdr refuses a split that also names a workspace, so the
+  // workspace is only for when there is no pane to split.
   let context = {};
   try {
     context = JSON.parse(process.env.HERDR_PLUGIN_CONTEXT_JSON || "{}");
   } catch {
     // No context: fall back to the env ids, if any.
   }
-  const target = process.env.HERDR_PANE_ID || context.focused_pane_id;
+  const from = process.env.HERDR_PANE_ID || context.focused_pane_id;
+  const target = from && (rightEdgePane(from)?.pane_id || from);
   const workspace = process.env.HERDR_WORKSPACE_ID || context.workspace_id;
   const args = ["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", ENTRYPOINT, "--focus"];
   if (target) args.push("--target-pane", target, "--direction", "right");
@@ -747,6 +856,7 @@ function openPane() {
 
 async function main() {
   if (argv.includes("--open")) process.exit(openPane());
+  if (argv.includes("--follow")) process.exit(followFocus());
   if (argv.includes("--once") || !process.stdin.isTTY || !process.stdout.isTTY) {
     process.exit(await printOnce(loadConfig()));
   }

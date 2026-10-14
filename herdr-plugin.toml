@@ -1,6 +1,6 @@
 id = "phorsmalahti.command-center"
 name = "Command Center"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "A pane listing the work you have in flight: your open pull requests, marked with their checks, reviews and conflicts."
 platforms = ["macos", "linux", "windows"]
@@ -33,3 +33,20 @@ title = "Open Command Center"
 description = "Show your open pull requests in a pane"
 contexts = ["global", "workspace", "tab", "pane"]
 command = ["node", "command-center.js", "--open"]
+
+# ---------------------------------------------------------------------------
+# Events
+#
+# A pane lives in one tab of one Space, so to stay in view the pane follows
+# you: on a switch it moves to the tab you switched to. Moving it emits no
+# focus event, so this cannot trigger itself. `follow = false` in the config
+# turns it off.
+# ---------------------------------------------------------------------------
+
+[[events]]
+on = "workspace.focused"
+command = ["node", "command-center.js", "--follow"]
+
+[[events]]
+on = "tab.focused"
+command = ["node", "command-center.js", "--follow"]

@@ -25,3 +25,7 @@ exclude_repos = []
 # How often the list refreshes by itself, in seconds (at least 30). Press `r`
 # in the pane to refresh on demand.
 refresh_seconds = 120
+
+# Move the pane along when you switch Space or tab, so it is always in view.
+# false leaves it in the tab where you opened it.
+follow = true
