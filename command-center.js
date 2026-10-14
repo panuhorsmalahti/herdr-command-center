@@ -637,7 +637,7 @@ function onKey(key, quit) {
     case "q":
     case "esc":
     case "\x03": // Ctrl-C
-      return quit();
+      return quit({ closePane: true });
     case "up":
     case "k":
       return select(ui.selected - 1);
@@ -665,12 +665,17 @@ function onKey(key, quit) {
 function runPane() {
   const { stdin, stdout } = process;
   let done = false;
-  const quit = () => {
+  const quit = ({ closePane = false } = {}) => {
     if (done) return;
     done = true;
+    const pane = closePane ? ownPaneId() : "";
     forgetPane();
     stdout.write("\x1b[?25h\x1b[?1049l");
     if (stdin.isTTY) stdin.setRawMode(false);
+    // herdr keeps a pane whose command has exited, with a shell in it. Quitting
+    // the list should take its pane away too. Not on a signal: that is herdr
+    // closing the pane already.
+    if (pane) herdr(["plugin", "pane", "close", pane]);
     process.exit(0);
   };
 
@@ -685,7 +690,7 @@ function runPane() {
     if (!done) draw();
   });
   stdout.on("resize", draw);
-  for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(sig, quit);
+  for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(sig, () => quit());
   // Ages and the "updated" clock go stale between refreshes.
   setInterval(draw, 30000).unref();
 
@@ -710,20 +715,32 @@ function herdrJson(args) {
   }
 }
 
+// The terminal this pane process draws in. A pane gets a new id every time it
+// moves to another tab, so HERDR_PANE_ID is only the id it opened with; the
+// terminal stays the same, and finds the pane wherever it went.
+let ownTerminal = "";
+
 // Where the open pane is, so `--open` can focus it and `--follow` can move it.
-// By terminal, not pane id: a pane gets a new id every time it moves to
-// another tab, but keeps its terminal. The pid tells a live pane from one
-// whose process was killed. A demo pane is left out, so it is never the one
-// focused or moved.
+// The pid tells a live pane from one whose process was killed. A demo pane is
+// left out, so it is never the one focused or moved.
 function rememberPane() {
-  if (!process.env.HERDR_PANE_ID || DEMO) return;
-  const terminal = herdrJson(["pane", "get", process.env.HERDR_PANE_ID])?.pane?.terminal_id;
-  if (!terminal) return;
+  if (!process.env.HERDR_PANE_ID) return;
+  ownTerminal = herdrJson(["pane", "get", process.env.HERDR_PANE_ID])?.pane?.terminal_id || "";
+  if (!ownTerminal || DEMO) return;
   try {
-    writeFileSync(PANE_PATH, JSON.stringify({ terminal, pid: process.pid }));
+    writeFileSync(PANE_PATH, JSON.stringify({ terminal: ownTerminal, pid: process.pid }));
   } catch {
     // Without it `--open` just opens a second pane, and nothing follows you.
   }
+}
+
+// The pane this process is in now, or "" when it cannot tell. Only the
+// opening id when the terminal was never known: an id from before a move could
+// by now name somebody else's pane.
+function ownPaneId() {
+  if (!ownTerminal) return process.env.HERDR_PANE_ID || "";
+  const panes = herdrJson(["pane", "list"])?.panes || [];
+  return panes.find((p) => p.terminal_id === ownTerminal)?.pane_id || "";
 }
 
 function forgetPane() {

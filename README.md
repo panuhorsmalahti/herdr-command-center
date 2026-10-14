@@ -49,7 +49,7 @@ In the pane:
 | `PgUp` `PgDn`, `g` `G` | page, top, bottom |
 | `⏎` / `o` | open the PR in your browser (through `gh`, so `GH_BROWSER` applies) |
 | `r` | refresh now |
-| `q` / `Esc` | close the pane |
+| `q` / `Esc` | close the pane (herdr would otherwise leave a shell in it) |
 
 ## It follows you
 
