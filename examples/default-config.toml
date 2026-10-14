@@ -1,0 +1,27 @@
+# Command Center configuration.
+#
+# Copy to the plugin's config directory:
+#   cp examples/default-config.toml "$(herdr plugin config-dir phorsmalahti.command-center)/config.toml"
+#
+# Every key is optional; these are the defaults. The file is re-read on every
+# refresh, so an edit shows up without reopening the pane.
+
+# The GitHub search that picks the PRs. Anything GitHub's search box takes
+# works. Results come newest-updated first, unless the query names its own
+# `sort:`.
+#   query = "is:pr is:open author:@me org:acme"        # one organisation
+#   query = "is:pr is:open review-requested:@me"       # waiting on your review
+#   query = "is:pr author:@me merged:>=2026-10-01"     # recently merged, 🟣
+query = "is:pr is:open author:@me archived:false"
+
+# Repositories whose PRs are never listed, as "owner/name". One per line is
+# fine. A name that matches no repository is ignored.
+#   exclude_repos = [
+#     "acme/website",
+#     "acme/marketing-site",
+#   ]
+exclude_repos = []
+
+# How often the list refreshes by itself, in seconds (at least 30). Press `r`
+# in the pane to refresh on demand.
+refresh_seconds = 120

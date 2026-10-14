@@ -1,0 +1,35 @@
+id = "phorsmalahti.command-center"
+name = "Command Center"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "A pane listing the work you have in flight: your open pull requests, marked with their checks, reviews and conflicts."
+platforms = ["macos", "linux", "windows"]
+
+# ---------------------------------------------------------------------------
+# Panes
+#
+# herdr plugins cannot draw into herdr's own UI, but they can own a terminal
+# pane. This one draws the list itself. `split` opens it beside the focused
+# pane, as a normal pane you can move, resize or zoom.
+#
+#   herdr plugin pane open --plugin phorsmalahti.command-center --entrypoint tasks
+# ---------------------------------------------------------------------------
+
+[[panes]]
+id = "tasks"
+title = "Command Center"
+placement = "split"
+command = ["node", "command-center.js"]
+
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
+
+# Open the pane, or focus it when it is already open. Actions are what a key
+# can be bound to; see the README.
+[[actions]]
+id = "open"
+title = "Open Command Center"
+description = "Show your open pull requests in a pane"
+contexts = ["global", "workspace", "tab", "pane"]
+command = ["node", "command-center.js", "--open"]
