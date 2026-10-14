@@ -61,6 +61,12 @@ nothing reloads.
 
 Set `follow = false` to leave the pane where you opened it.
 
+Following needs a herdr **server** of 0.9.1 or newer. A 0.9.0 server only
+fires focus events for switches made through its API, not for the ones you
+make yourself (fixed in 0.9.1, #4077). After a client-only update the old
+server keeps running: `herdr status` shows `server_binary_stale: yes`. Restart
+it onto the new binary with `herdr update --handoff`.
+
 ## The marks
 
 The same as herdr-space-topic's, so a PR reads the same in the sidebar and
