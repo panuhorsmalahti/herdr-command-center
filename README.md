@@ -46,7 +46,7 @@ In the pane:
 | key | does |
 | --- | --- |
 | `↑` `↓` / `k` `j` | move |
-| click a PR | select it |
+| click a PR | select it, and switch to [its Space](#jump-to-a-prs-space), if one is working on it |
 | double-click a PR | open it in your browser |
 | mouse wheel | move |
 | `PgUp` `PgDn`, `g` `G` | page, top, bottom |
@@ -69,6 +69,20 @@ fires focus events for switches made through its API, not for the ones you
 make yourself (fixed in 0.9.1, #4077). After a client-only update the old
 server keeps running: `herdr status` shows `server_binary_stale: yes`. Restart
 it onto the new binary with `herdr update --handoff`.
+
+## Jump to a PR's Space
+
+Click a PR and you switch to the Space working on it: a Space with a pane
+whose checkout has the PR's branch, in a clone of its repository. With
+[herdr-space-topic](https://github.com/panuhorsmalahti/herdr-space-topic),
+that's the Space named after the PR. When no Space is working on it, the click
+just selects the PR, and so does a click on the PR of the Space you're in.
+
+A branch counts under its own name and under the one it was pushed as, so a
+worktree's `worktree/fix-login` pushed as `fix/login` finds that PR. A Claude
+Code session that moved into a worktree is found there, from its transcript,
+rather than in the directory herdr saw it start in. When several Spaces have
+the branch, one where an agent has it wins.
 
 ## The marks
 

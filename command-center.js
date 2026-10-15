@@ -22,7 +22,9 @@
 "use strict";
 
 const { execFile, spawnSync } = require("node:child_process");
-const { readFileSync, writeFileSync, rmSync } = require("node:fs");
+const fs = require("node:fs");
+const { readFileSync, writeFileSync, rmSync } = fs;
+const { homedir } = require("node:os");
 const { join } = require("node:path");
 
 const HERDR = process.env.HERDR_BIN_PATH || "herdr";
@@ -134,6 +136,7 @@ const SEARCH_QUERY = `query($q: String!) {
       ... on PullRequest {
         number title url state isDraft mergeable reviewDecision updatedAt
         repository { nameWithOwner }
+        headRefName headRepository { nameWithOwner }
         commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
           ... on CheckRun { status conclusion }
           ... on StatusContext { state }
@@ -193,6 +196,10 @@ function toPr(node) {
     title: oneLine(node.title),
     url: node.url,
     repo: oneLine(node.repository?.nameWithOwner),
+    // Where its commits are: the branch, in this repository or a fork of it.
+    // How a click finds the Space working on it.
+    branch: node.headRefName || "",
+    headRepo: node.headRepository?.nameWithOwner || "",
     draft: !!node.isDraft,
     updatedAt: Date.parse(node.updatedAt) || 0,
     state: node.state,
@@ -461,6 +468,150 @@ async function printOnce(cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// Spaces
+//
+// Clicking a PR also takes you to the Space working on it, if there is one: a
+// Space with a pane whose checkout has the PR's branch, in a clone of its
+// repository. That is how herdr-space-topic finds a Space's PR too, so you
+// land in the Space named after the PR you clicked.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+const TRANSCRIPT_TAIL_BYTES = 256 * 1024;
+
+// A command's output, or "" when it fails: here a failure only means "not
+// this one".
+function output(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 }, (error, stdout) =>
+      resolve(error ? "" : stdout),
+    );
+  });
+}
+
+// Where a Claude Code agent is really working. Claude Code moves a session
+// into a worktree (`claude --worktree`, or its EnterWorktree tool) without
+// changing its process's directory, so herdr keeps reporting the directory it
+// was launched from -- usually the main checkout, on main. The session
+// transcript records the truth: every entry carries the session's cwd, and
+// herdr hands us the session id. "" when that cannot be read.
+function claudeCwd(pane) {
+  const id = pane.agent === "claude" ? pane.agent_session?.value : "";
+  if (!id || !/^[\w-]+$/.test(id)) return "";
+  const projects = join(CLAUDE_DIR, "projects");
+  let file = "";
+  try {
+    // Transcripts are filed under the directory the session is in, which is
+    // what we do not know yet, so look the id up across all of them.
+    for (const dir of fs.readdirSync(projects)) {
+      const f = join(projects, dir, `${id}.jsonl`);
+      if (fs.existsSync(f)) {
+        file = f;
+        break;
+      }
+    }
+  } catch {
+    return "";
+  }
+  if (!file) return "";
+
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, TRANSCRIPT_TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString("utf8").split("\n");
+    if (len < size) lines.shift(); // we started mid-line
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"cwd"')) continue;
+      try {
+        const cwd = JSON.parse(lines[i]).cwd;
+        // A worktree removed since is no place to look for a branch.
+        if (typeof cwd === "string" && cwd && fs.existsSync(cwd)) return cwd;
+      } catch {
+        // A line still being written; try the one before.
+      }
+    }
+  } catch {
+    // Unreadable transcript: fall back to herdr's view.
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return "";
+}
+
+// "owner/name" of a GitHub remote, lowercased, from any of its URL forms:
+// git@github.com:owner/name.git, https://github.com/owner/name, ssh://...
+function remoteRepo(url) {
+  const m = /[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(url);
+  return m ? `${m[1]}/${m[2]}`.toLowerCase() : "";
+}
+
+// The branch checked out in `dir` under both its names -- its own, and the
+// one it was pushed as, which the PR knows it by (a worktree's
+// `worktree/fix-x` pushed as `feat/fix-x`) -- and the repositories its
+// remotes point at. HEAD is detached for the length of a rebase, which is
+// when an agent is fixing a PR's conflicts, but git still records the branch
+// being rebased, so that one counts.
+async function checkout(dir) {
+  const [head, config] = await Promise.all([
+    output("git", ["-C", dir, "rev-parse", "--absolute-git-dir", "--abbrev-ref", "HEAD"]),
+    output("git", ["-C", dir, "config", "--get-regexp", "^(remote\\..*\\.url|branch\\..*\\.merge)$"]),
+  ]);
+  const [gitDir = "", ref = ""] = head.trim().split(/\r?\n/);
+  let branch = ref === "HEAD" ? "" : ref;
+  for (const f of ref === "HEAD" ? ["rebase-merge/head-name", "rebase-apply/head-name"] : []) {
+    try {
+      const name = readFileSync(join(gitDir, f), "utf8").trim();
+      if (name.startsWith("refs/heads/")) branch = name.slice("refs/heads/".length);
+    } catch {
+      // Not this kind of rebase, or none at all.
+    }
+  }
+  const repos = [];
+  const branches = branch ? [branch] : [];
+  for (const line of config.split(/\r?\n/)) {
+    const [key = "", value = ""] = line.trim().split(/\s+/);
+    if (/^remote\..*\.url$/.test(key)) repos.push(remoteRepo(value));
+    else if (branch && key === `branch.${branch}.merge` && value.startsWith("refs/heads/")) {
+      branches.push(value.slice("refs/heads/".length));
+    }
+  }
+  return { branches, repos: repos.filter(Boolean) };
+}
+
+// The Space working on `pr`, or "" when no Space is, or when you are in it
+// already. A Space whose agent has the branch wins over one where only a
+// shell does; otherwise the first in the sidebar.
+async function spaceFor(pr) {
+  if (!pr?.branch) return "";
+  let panes;
+  try {
+    panes = JSON.parse(await output(HERDR, ["pane", "list"])).result.panes || [];
+  } catch {
+    return "";
+  }
+  const wanted = [pr.repo, pr.headRepo].filter(Boolean).map((r) => r.toLowerCase());
+  // Panes in one checkout share one look at it.
+  const looks = new Map();
+  const hits = await Promise.all(
+    panes.map(async (p) => {
+      const dir = p.terminal_id !== ownTerminal && (claudeCwd(p) || p.foreground_cwd || p.cwd);
+      if (!dir) return false;
+      if (!looks.has(dir)) looks.set(dir, checkout(dir));
+      const { branches, repos } = await looks.get(dir);
+      return branches.includes(pr.branch) && repos.some((r) => wanted.includes(r));
+    }),
+  );
+  const matches = panes.filter((_, i) => hits[i]);
+  const here = panes.find((p) => p.focused)?.workspace_id;
+  if (matches.some((p) => p.workspace_id === here)) return "";
+  return (matches.find((p) => p.agent) || matches[0])?.workspace_id || "";
+}
+
+// ---------------------------------------------------------------------------
 // The pane
 // ---------------------------------------------------------------------------
 
@@ -647,14 +798,27 @@ function* keys(data) {
   }
 }
 
+// Switch to the Space working on `pr`, if one is. The lookup takes a few git
+// calls, and only the latest one acts, so clicking down the list leaves you in
+// the Space of the PR you stopped on. The pane follows you there.
+let spaceLookup = 0;
+
+async function goToSpace(pr) {
+  if (DEMO) return; // made-up PRs have no Space
+  const lookup = ++spaceLookup;
+  const id = await spaceFor(pr);
+  if (id && lookup === spaceLookup) herdr(["workspace", "focus", id]);
+}
+
 // Mouse reports carry no click count, so a double-click is two presses on the
 // same PR this close together.
 const DOUBLE_CLICK_MS = 400;
 let lastClick = { index: -1, at: 0 };
 
-// A left click on a PR selects it, and a double-click opens it; the wheel
-// moves the selection, since the list scrolls to follow it. Clicks elsewhere,
-// other buttons, releases and drags do nothing.
+// A left click on a PR selects it and takes you to its Space, and a
+// double-click opens it; the wheel moves the selection, since the list
+// scrolls to follow it. Clicks elsewhere, other buttons, releases and drags do
+// nothing.
 function onMouse({ button, row, press }) {
   if (!press || button & 32) return; // 32: motion
   if (button & 64) return select(ui.selected + ((button & 3) === 0 ? -1 : 1)); // 64: wheel
@@ -667,6 +831,7 @@ function onMouse({ button, row, press }) {
   // A third click starts over rather than opening the PR a second time.
   lastClick = double ? { index: -1, at: 0 } : { index: line.index, at: now };
   if (double) openSelected();
+  else goToSpace(ordered()[line.index]);
 }
 
 function onKey(key, quit) {
