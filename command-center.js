@@ -24,6 +24,7 @@
 const { execFile, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const { readFileSync, writeFileSync, rmSync } = fs;
+const net = require("node:net");
 const { homedir } = require("node:os");
 const { join } = require("node:path");
 
@@ -582,33 +583,114 @@ async function checkout(dir) {
   return { branches, repos: repos.filter(Boolean) };
 }
 
+// Every pane in the session, in sidebar order.
+async function sessionPanes() {
+  try {
+    return JSON.parse(await output(HERDR, ["pane", "list"])).result.panes || [];
+  } catch {
+    return [];
+  }
+}
+
+// `panes` with what each one's checkout has: { pane, branches, repos }. This
+// pane has none. Panes in one checkout share one look at it.
+function withCheckouts(panes) {
+  const looks = new Map();
+  return Promise.all(
+    panes.map(async (pane) => {
+      const dir = pane.terminal_id !== ownTerminal && (claudeCwd(pane) || pane.foreground_cwd || pane.cwd);
+      if (!dir) return { pane, branches: [], repos: [] };
+      if (!looks.has(dir)) looks.set(dir, checkout(dir));
+      return { pane, ...(await looks.get(dir)) };
+    }),
+  );
+}
+
+// Whether a pane's checkout is working on `pr`: it has the PR's branch, in a
+// clone of the PR's repository or of the fork the branch is in.
+function worksOn({ branches, repos }, pr) {
+  if (!pr?.branch || !branches.includes(pr.branch)) return false;
+  const wanted = [pr.repo, pr.headRepo].filter(Boolean).map((r) => r.toLowerCase());
+  return repos.some((r) => wanted.includes(r));
+}
+
 // The Space working on `pr`, or "" when no Space is, or when you are in it
 // already. A Space whose agent has the branch wins over one where only a
 // shell does; otherwise the first in the sidebar.
 async function spaceFor(pr) {
   if (!pr?.branch) return "";
-  let panes;
-  try {
-    panes = JSON.parse(await output(HERDR, ["pane", "list"])).result.panes || [];
-  } catch {
-    return "";
-  }
-  const wanted = [pr.repo, pr.headRepo].filter(Boolean).map((r) => r.toLowerCase());
-  // Panes in one checkout share one look at it.
-  const looks = new Map();
-  const hits = await Promise.all(
-    panes.map(async (p) => {
-      const dir = p.terminal_id !== ownTerminal && (claudeCwd(p) || p.foreground_cwd || p.cwd);
-      if (!dir) return false;
-      if (!looks.has(dir)) looks.set(dir, checkout(dir));
-      const { branches, repos } = await looks.get(dir);
-      return branches.includes(pr.branch) && repos.some((r) => wanted.includes(r));
-    }),
-  );
-  const matches = panes.filter((_, i) => hits[i]);
+  const panes = await sessionPanes();
+  const matches = (await withCheckouts(panes)).filter((l) => worksOn(l, pr)).map((l) => l.pane);
   const here = panes.find((p) => p.focused)?.workspace_id;
   if (matches.some((p) => p.workspace_id === here)) return "";
   return (matches.find((p) => p.agent) || matches[0])?.workspace_id || "";
+}
+
+// The PR the Space `id` is working on (the one you are in, without an id), or
+// null. The selected PR stays when the Space is on it, as it is when you got
+// there by clicking it. Otherwise the focused pane's PR comes first, then an
+// agent's, then any pane's.
+async function prOfSpace(id) {
+  const panes = await sessionPanes();
+  const space = id || panes.find((p) => p.focused)?.workspace_id;
+  const looks = await withCheckouts(panes.filter((p) => p.workspace_id === space));
+  const prs = ordered();
+  const selected = prs[ui.selected];
+  if (looks.some((l) => worksOn(l, selected))) return selected;
+  const rank = (l) => (l.pane.focused ? 0 : l.pane.agent ? 1 : 2);
+  for (const l of looks.sort((a, b) => rank(a) - rank(b))) {
+    const pr = prs.find((p) => worksOn(l, p));
+    if (pr) return pr;
+  }
+  return null;
+}
+
+// Select the PR of the Space you switched to, if it has one. Only the latest
+// lookup acts, and none does once you have moved the selection yourself
+// while it ran.
+let spaceSync = 0;
+
+async function selectSpacePr(id) {
+  if (DEMO) return;
+  const sync = ++spaceSync;
+  const before = ui.selectedUrl;
+  const pr = await prOfSpace(id);
+  if (!pr || sync !== spaceSync || ui.selectedUrl !== before) return;
+  select(ordered().indexOf(pr));
+  draw();
+}
+
+// herdr tells subscribers of every Space switch, yours included, so the list
+// hears of one as it happens. The subscription is a socket that stays open;
+// when it drops (herdr restarting onto a new version, say) it is retried.
+const RESUBSCRIBE_MS = 5000;
+
+function watchSpaces() {
+  const path = process.env.HERDR_SOCKET_PATH;
+  if (!path || DEMO) return;
+  const sock = net.createConnection(path);
+  let buffer = "";
+  sock.setEncoding("utf8");
+  sock.on("connect", () => {
+    const request = { id: "command-center", method: "events.subscribe", params: { subscriptions: [{ type: "workspace.focused" }] } };
+    sock.write(`${JSON.stringify(request)}\n`);
+  });
+  // One JSON message per line.
+  sock.on("data", (data) => {
+    buffer += data;
+    for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      try {
+        const msg = JSON.parse(line);
+        if (msg.event === "workspace_focused") selectSpacePr(msg.data?.workspace_id);
+      } catch {
+        // Not a message we know.
+      }
+    }
+  });
+  sock.on("error", () => {}); // "close" follows
+  sock.on("close", () => setTimeout(watchSpaces, RESUBSCRIBE_MS));
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +739,7 @@ function flash(message) {
 async function refresh() {
   if (ui.loading) return;
   clearTimeout(ui.refreshTimer);
+  const first = !ui.loaded;
   ui.cfg = loadConfig();
   ui.loading = true;
   draw();
@@ -676,6 +759,8 @@ async function refresh() {
   const at = ordered().findIndex((pr) => pr.url === ui.selectedUrl);
   select(at >= 0 ? at : ui.selected);
   draw();
+  // The list opens on the PR of the Space you are in.
+  if (first && ui.loaded) selectSpacePr();
   ui.refreshTimer = setTimeout(refresh, ui.cfg.refresh_seconds * 1000);
 }
 
@@ -900,6 +985,7 @@ function runPane() {
   setInterval(draw, 30000).unref();
 
   refresh();
+  watchSpaces();
 }
 
 // ---------------------------------------------------------------------------
