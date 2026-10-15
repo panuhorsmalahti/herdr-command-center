@@ -62,6 +62,12 @@ right edge of the tab you switched to, at the width it had. Resize it once and
 it keeps that width everywhere. The list keeps running through the move, so
 nothing reloads.
 
+When the last of your panes in a tab exits, as when you quit the agent of a
+Space, the list doesn't hold the tab open on its own. It takes you to another
+tab of that Space, or else back to the Space you were in before, and the tab
+it leaves empty closes, along with its Space when that was its only tab: what
+herdr would have done without the list there.
+
 Set `follow = false` to leave the pane where you opened it.
 
 Following needs a herdr **server** of 0.9.1 or newer. A 0.9.0 server only

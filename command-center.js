@@ -660,10 +660,56 @@ async function selectSpacePr(id) {
   draw();
 }
 
-// herdr tells subscribers of every Space switch, yours included, so the list
-// hears of one as it happens. The subscription is a socket that stays open;
-// when it drops (herdr restarting onto a new version, say) it is retried.
+// The Spaces you have been in, most recent last.
+const visited = [];
+
+function spaceFocused(id) {
+  if (!id) return;
+  if (visited.includes(id)) visited.splice(visited.indexOf(id), 1);
+  visited.push(id);
+  selectSpacePr(id);
+}
+
+// When the last of your panes in a tab exits, the list is left in the tab
+// alone, as wide as the tab, and keeps the tab open, and with it the Space if
+// that was its only tab. herdr would have closed them and taken you elsewhere,
+// so the list does that instead: it takes you to another tab of the Space, or
+// else to the Space you were in before, and as it follows you there the tab
+// it leaves empty closes. Only when you are on the list: when you are
+// somewhere else, the focus events have it follow you already.
+const LEAVE_COOLDOWN_MS = 1000;
+let leaving = false;
+
+function leaveIfAlone(layout) {
+  if (leaving || DEMO || !ui.cfg.follow || layout.panes?.length !== 1) return;
+  const mine = ownPaneId();
+  if (!mine || layout.panes[0].pane_id !== mine) return;
+  const focused = (herdrJson(["pane", "list"])?.panes || []).find((p) => p.focused);
+  if (focused?.pane_id !== mine) return;
+  leaving = true;
+  setTimeout(() => (leaving = false), LEAVE_COOLDOWN_MS);
+  const tabs = herdrJson(["tab", "list"])?.tabs || [];
+  const here = tabs.find((t) => t.tab_id === layout.tab_id);
+  const siblings = tabs.filter((t) => t.workspace_id === layout.workspace_id && t !== here);
+  if (siblings.length) {
+    // The tab before this one, as closing a tab does, or else the first.
+    const before = siblings.filter((t) => t.number < (here?.number ?? 0)).pop();
+    return herdr(["tab", "focus", (before || siblings[0]).tab_id]);
+  }
+  const spaces = (herdrJson(["workspace", "list"])?.workspaces || []).map((w) => w.workspace_id);
+  const at = spaces.indexOf(layout.workspace_id);
+  const others = spaces.filter((id) => id !== layout.workspace_id);
+  // Failing one you were in, its neighbour in the sidebar.
+  const next = visited.filter((id) => others.includes(id)).pop() || spaces[at + 1] || spaces[at - 1];
+  if (next && next !== layout.workspace_id) herdr(["workspace", "focus", next]);
+}
+
+// herdr tells subscribers of every Space switch, yours included, and every
+// change of a tab's layout, so the list hears of them as they happen. The
+// subscription is a socket that stays open; when it drops (herdr restarting
+// onto a new version, say) it is retried.
 const RESUBSCRIBE_MS = 5000;
+const EVENTS = ["workspace.focused", "layout.updated"];
 
 function watchSpaces() {
   const path = process.env.HERDR_SOCKET_PATH;
@@ -672,8 +718,8 @@ function watchSpaces() {
   let buffer = "";
   sock.setEncoding("utf8");
   sock.on("connect", () => {
-    const request = { id: "command-center", method: "events.subscribe", params: { subscriptions: [{ type: "workspace.focused" }] } };
-    sock.write(`${JSON.stringify(request)}\n`);
+    const subscriptions = EVENTS.map((type) => ({ type }));
+    sock.write(`${JSON.stringify({ id: "command-center", method: "events.subscribe", params: { subscriptions } })}\n`);
   });
   // One JSON message per line.
   sock.on("data", (data) => {
@@ -683,7 +729,8 @@ function watchSpaces() {
       buffer = buffer.slice(nl + 1);
       try {
         const msg = JSON.parse(line);
-        if (msg.event === "workspace_focused") selectSpacePr(msg.data?.workspace_id);
+        if (msg.event === "workspace_focused") spaceFocused(msg.data?.workspace_id);
+        if (msg.event === "layout_updated" && msg.data?.layout) leaveIfAlone(msg.data.layout);
       } catch {
         // Not a message we know.
       }
@@ -1076,9 +1123,28 @@ function settle(paneId) {
   herdr(["pane", "resize", "--pane", paneId, "--direction", "left", "--amount", "0.01"]);
 }
 
-function paneWidth(paneId) {
-  const panes = herdrJson(["pane", "layout", "--pane", paneId])?.layout?.panes || [];
-  return panes.find((p) => p.pane_id === paneId)?.rect.width || 0;
+// The width you gave the list, in columns; 0 when it is not known. Measured
+// while the list shares its tab and remembered, because alone in a tab, or
+// zoomed, it is as wide as the tab, which says nothing of the width you want:
+// carried along, that would squeeze your work into a quarter of the next tab.
+const WIDTH_PATH = join(STATE_DIR, "command-center-width.json");
+
+function listWidth(paneId) {
+  const layout = herdrJson(["pane", "layout", "--pane", paneId])?.layout;
+  const width = layout?.panes?.find((p) => p.pane_id === paneId)?.rect.width;
+  if (width && layout.panes.length > 1 && !layout.zoomed) {
+    try {
+      writeFileSync(WIDTH_PATH, JSON.stringify({ width }));
+    } catch {
+      // Unremembered, it is measured again on the next move.
+    }
+    return width;
+  }
+  try {
+    return Number(JSON.parse(readFileSync(WIDTH_PATH, "utf8")).width) || 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,7 +1199,7 @@ function followFocus() {
     const { mine, focused } = livePanes();
     if (!mine || !focused || focused.tab_id === mine.tab_id) return 0;
     const target = rightEdgePane(focused.pane_id) || { pane_id: focused.pane_id, rect: { width: 0 } };
-    const width = paneWidth(mine.pane_id);
+    const width = listWidth(mine.pane_id);
     const ratio = width && target.rect.width ? Math.max(0.25, Math.min(0.8, 1 - width / target.rect.width)) : DEFAULT_RATIO;
     const args = ["pane", "move", mine.pane_id, "--tab", focused.tab_id, "--target-pane", target.pane_id];
     args.push("--split", "right", "--ratio", ratio.toFixed(2), "--no-focus");
