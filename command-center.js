@@ -214,24 +214,47 @@ function toPr(node) {
   };
 }
 
-function gh(args) {
+// What macOS says to an Intel-only program once Rosetta is gone.
+const BAD_CPU = -86;
+// Homebrew's home on Apple Silicon. A PATH set up before a move to native
+// Homebrew still finds the Intel builds in /usr/local first, and herdr hands
+// its panes the PATH its server started with, so a command that cannot run
+// is tried from here, and found here from then on.
+const NATIVE_BIN = "/opt/homebrew/bin";
+const native = new Map();
+
+// execFile, but a program that cannot start at all fails like any other
+// instead of throwing.
+function run(cmd, args, options) {
   return new Promise((resolve) => {
-    execFile(
-      "gh",
-      args,
-      {
-        timeout: 30000,
-        maxBuffer: 16 << 20,
-        env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
-      },
-      (error, stdout, stderr) => resolve({ error, stdout, stderr }),
-    );
+    const start = (file) => {
+      try {
+        execFile(file, args, options, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+      } catch (error) {
+        const alt = join(NATIVE_BIN, cmd);
+        if (error.errno === BAD_CPU && file === cmd && fs.existsSync(alt)) {
+          native.set(cmd, alt);
+          return start(alt);
+        }
+        resolve({ error, stdout: "", stderr: "" });
+      }
+    };
+    start(native.get(cmd) || cmd);
+  });
+}
+
+function gh(args) {
+  return run("gh", args, {
+    timeout: 30000,
+    maxBuffer: 16 << 20,
+    env: { ...process.env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
   });
 }
 
 // The first useful line of whatever went wrong, short enough for a header.
 function ghError(r) {
   if (r.error?.code === "ENOENT") return "gh not found: install the GitHub CLI";
+  if (r.error?.errno === BAD_CPU) return "gh is built for another CPU: install a native gh";
   if (r.error?.killed) return "gh timed out";
   const line = `${r.stderr || ""}`.split(/\r?\n/).find((l) => l.trim());
   return oneLine(line || r.error?.message || "gh failed");
@@ -482,12 +505,9 @@ const TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 
 // A command's output, or "" when it fails: here a failure only means "not
 // this one".
-function output(cmd, args) {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 }, (error, stdout) =>
-      resolve(error ? "" : stdout),
-    );
-  });
+async function output(cmd, args) {
+  const r = await run(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20 });
+  return r.error ? "" : r.stdout;
 }
 
 // Where a Claude Code agent is really working. Claude Code moves a session
@@ -1101,7 +1121,23 @@ function livePanes() {
   } catch {
     // No pane open.
   }
-  return { mine, focused: panes.find((p) => p.focused) || null };
+  return { mine, focused: panes.find((p) => p.focused) || null, panes };
+}
+
+// The title herdr gives this pane, from herdr-plugin.toml.
+const TITLE = "Command Center";
+
+// After a restart -- a reboot, say -- herdr brings the session back with every
+// pane where it was, but this one comes back as a plain shell, still titled
+// Command Center, with the list gone. Those husks, among `panes`: titled so,
+// with something other than this program in front. A pane whose processes
+// cannot be read is left alone.
+function husks(panes) {
+  return panes.filter((p) => {
+    if (p.label !== TITLE) return false;
+    const procs = herdrJson(["pane", "process-info", "--pane", p.pane_id])?.process_info?.foreground_processes;
+    return Array.isArray(procs) && !procs.some((f) => (f.argv || []).join(" ").includes("command-center.js"));
+  });
 }
 
 // The pane at the right edge of a tab (the top one, when several reach it):
@@ -1140,11 +1176,29 @@ function listWidth(paneId) {
     }
     return width;
   }
+  return rememberedWidth();
+}
+
+function rememberedWidth() {
   try {
     return Number(JSON.parse(readFileSync(WIDTH_PATH, "utf8")).width) || 0;
   } catch {
     return 0;
   }
+}
+
+// herdr opens a split half and half. Resize it to the width you gave the list
+// (within what the tab can spare), which also makes herdr resize the pane it
+// split, as settle() does.
+function fitWidth(target, pane) {
+  const panes = herdrJson(["pane", "layout", "--pane", target])?.layout?.panes || [];
+  const a = panes.find((p) => p.pane_id === target)?.rect;
+  const b = panes.find((p) => p.pane_id === pane)?.rect;
+  const total = a && b ? a.width + b.width : 0;
+  const want = total && Math.max(0.2 * total, Math.min(0.75 * total, rememberedWidth()));
+  const amount = total && rememberedWidth() ? (b.width - want) / total : 0;
+  if (Math.abs(amount) < 0.01) return settle(target);
+  herdr(["pane", "resize", "--pane", target, "--direction", amount > 0 ? "right" : "left", "--amount", Math.abs(amount).toFixed(3)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,10 +1247,37 @@ function withLock(fn) {
   }
 }
 
+// A husk is replaced on the next switch, by a list beside you (or where the
+// husk is, when you are on it), so the list comes back after a restart the
+// way your other panes do. A pane you closed leaves no husk, so it stays
+// closed. Not again within REVIVE_COOLDOWN_MS, should a revived list die
+// as it starts.
+const REVIVE_PATH = join(STATE_DIR, "command-center-revived.json");
+const REVIVE_COOLDOWN_MS = 30000;
+
+function revive(panes, focused) {
+  const dead = husks(panes);
+  if (!dead.length) return 0;
+  try {
+    if (Date.now() - JSON.parse(readFileSync(REVIVE_PATH, "utf8")).at < REVIVE_COOLDOWN_MS) return 0;
+  } catch {
+    // Never revived.
+  }
+  try {
+    writeFileSync(REVIVE_PATH, JSON.stringify({ at: Date.now() }));
+  } catch {
+    // Then the cooldown just does not apply.
+  }
+  const status = openList({ from: focused.pane_id, focus: false });
+  if (status === 0) for (const husk of dead) herdr(["pane", "close", husk.pane_id]);
+  return status;
+}
+
 function followFocus() {
   if (!loadConfig().follow) return 0;
   return withLock(() => {
-    const { mine, focused } = livePanes();
+    const { mine, focused, panes } = livePanes();
+    if (!mine && focused) return revive(panes, focused);
     if (!mine || !focused || focused.tab_id === mine.tab_id) return 0;
     const target = rightEdgePane(focused.pane_id) || { pane_id: focused.pane_id, rect: { width: 0 } };
     const width = listWidth(mine.pane_id);
@@ -1213,32 +1294,49 @@ function followFocus() {
 // --open: what the `open` action runs
 // ---------------------------------------------------------------------------
 
+// Open the list beside `from`, or rather beside whichever pane of its tab is
+// at the right edge, at the width you gave it. herdr refuses a split that
+// also names a workspace, so `workspace` is only for when there is no pane to
+// split.
+function openList({ from, workspace, focus }) {
+  const target = from && (rightEdgePane(from)?.pane_id || from);
+  const args = ["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", ENTRYPOINT];
+  args.push(focus ? "--focus" : "--no-focus");
+  if (target) args.push("--target-pane", target, "--direction", "right");
+  else if (workspace) args.push("--workspace", workspace);
+  const r = herdr(args, ["ignore", "pipe", "inherit"]);
+  if (r.error) {
+    process.stderr.write(`command-center: cannot run ${HERDR}: ${r.error.message}\n`);
+    return 1;
+  }
+  if (r.status === 0 && target) {
+    let opened = "";
+    try {
+      opened = JSON.parse(r.stdout).result.plugin_pane.pane.pane_id;
+    } catch {
+      // Then it stays half and half.
+    }
+    fitWidth(target, opened);
+  }
+  return r.status ?? 1;
+}
+
 function openPane() {
-  const { mine } = livePanes();
+  const { mine, panes } = livePanes();
   if (mine && herdr(["plugin", "pane", "focus", mine.pane_id]).status === 0) return 0;
-  // A split opens beside an existing pane: the one the action ran from, or
-  // failing that the focused one, or rather whichever pane of their tab is at
-  // its right edge. herdr refuses a split that also names a workspace, so the
-  // workspace is only for when there is no pane to split.
+  // Beside the pane the action ran from, or failing that the focused one.
   let context = {};
   try {
     context = JSON.parse(process.env.HERDR_PLUGIN_CONTEXT_JSON || "{}");
   } catch {
     // No context: fall back to the env ids, if any.
   }
+  const dead = husks(panes);
   const from = process.env.HERDR_PANE_ID || context.focused_pane_id;
-  const target = from && (rightEdgePane(from)?.pane_id || from);
-  const workspace = process.env.HERDR_WORKSPACE_ID || context.workspace_id;
-  const args = ["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", ENTRYPOINT, "--focus"];
-  if (target) args.push("--target-pane", target, "--direction", "right");
-  else if (workspace) args.push("--workspace", workspace);
-  const r = herdr(args, ["ignore", "ignore", "inherit"]);
-  if (r.error) {
-    process.stderr.write(`command-center: cannot run ${HERDR}: ${r.error.message}\n`);
-    return 1;
-  }
-  if (r.status === 0 && target) settle(target);
-  return r.status ?? 1;
+  const status = openList({ from, workspace: process.env.HERDR_WORKSPACE_ID || context.workspace_id, focus: true });
+  // A list left from before a restart goes, now there is a live one.
+  if (status === 0) for (const husk of dead) herdr(["pane", "close", husk.pane_id]);
+  return status;
 }
 
 async function main() {

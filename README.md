@@ -29,8 +29,9 @@ Requires herdr >= 0.9.0, `node` >= 18 on your `PATH`, and the GitHub CLI,
 herdr plugin action invoke phorsmalahti.command-center.open
 ```
 
-The `open` action puts the list at the right edge of the tab you are in. If
-the pane is already open, it focuses that one rather than opening another. Bind
+The `open` action puts the list at the right edge of the tab you are in, at
+the width you last gave it. If the pane is already open, it focuses that one
+rather than opening another. Bind
 it to a key in your herdr `config.toml`:
 
 ```toml
@@ -68,7 +69,13 @@ tab of that Space, or else back to the Space you were in before, and the tab
 it leaves empty closes, along with its Space when that was its only tab: what
 herdr would have done without the list there.
 
-Set `follow = false` to leave the pane where you opened it.
+After herdr restarts (a reboot, say), it brings your panes back, but this one
+as a plain shell, still titled Command Center. On your next switch of Space or
+tab, the plugin replaces that shell with a working list, beside you. A list
+you closed leaves no such shell, so it stays closed.
+
+Set `follow = false` to leave the pane where you opened it. Then the `open`
+action is what replaces the shell left after a restart.
 
 Following needs a herdr **server** of 0.9.1 or newer. A 0.9.0 server only
 fires focus events for switches made through its API, not for the ones you
@@ -178,6 +185,11 @@ the pane.
 - **Space switches** reach the list through herdr's socket API
   (`HERDR_SOCKET_PATH`): the pane subscribes to `workspace.focused` while it
   runs, and subscribes again if herdr restarts.
+- **Intel tools on Apple Silicon.** Without Rosetta (gone in macOS 27), an
+  Intel build of `gh` or `git` cannot run. One that fails that way is tried
+  from native Homebrew, `/opt/homebrew/bin`, instead. herdr hands its panes the
+  `PATH` its server started with, so this keeps the list working after you
+  move to native Homebrew, until the server next restarts.
 - **Resizing.** herdr resizes a pane it moves or opens, but not the pane that
   pane split, so the program there would keep drawing at its old width, over
   the list, until you focused it. After each move or open the plugin nudges the
